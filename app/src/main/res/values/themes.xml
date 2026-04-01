@@ -1,0 +1,4 @@
+<resources>
+
+    <style name="Theme.MrAtsmaStudentTracker" parent="Theme.MaterialComponents.Light" />
+</resources>
