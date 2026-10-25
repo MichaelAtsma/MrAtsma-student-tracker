@@ -33,7 +33,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         private set
     var hostSessionId by mutableStateOf<Long?>(null)
         private set
-    var hostIp by mutableStateOf<String?>(null)
+    var localIp by mutableStateOf<String?>(null)
         private set
     var publicIp by mutableStateOf<String?>(null)
         private set
@@ -61,10 +61,9 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
 
         hostSessionId = sessionId
         currentStudentViewModel = studentViewModel
-        
-        // Prefer local IP for reliability if on same network
-        val localIp = NetworkUtils.getLocalIpAddress()
-        hostIp = localIp ?: "Checking..."
+
+        localIp = NetworkUtils.getLocalIpAddress() ?: "No local IP found"
+        publicIp = "No public IP found"
         connectionStatus = "Detecting IP..."
         
         viewModelScope.launch {
@@ -72,18 +71,10 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                 val pIp = NetworkUtils.getMyPublicIpAsync().await()
                 if (!pIp.contains("error")) {
                     publicIp = pIp
-                    // Only use public IP as primary hostIp if local IP is not available
-                    // This prevents NAT loopback issues when devices are on the same network
-                    if (hostIp == "Checking..." || hostIp == null) {
-                        hostIp = pIp
-                    }
                 }
             } catch (e: Exception) {
                 Log.e("Collaboration", "Public IP fetch failed", e)
             } finally {
-                if (hostIp == "Checking...") {
-                    hostIp = NetworkUtils.getLocalIpAddress() ?: "No IP found"
-                }
                 startServer()
             }
         }
@@ -97,7 +88,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         serverJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 serverSocket = ServerSocket(PORT)
-                connectionStatus = "Hosting on $hostIp:$PORT"
+                connectionStatus = "Hosting on $publicIp:$PORT" // TODO add local IP
                 Log.d("Collaboration", "Server started on port $PORT")
                 
                 while (isActive && isHosting) {
@@ -150,10 +141,12 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                     val student = currentStudentViewModel?.getStudentById(studentId)?.firstOrNull()
                     
                     if (student != null) {
+                        val isTargeted = currentStudentViewModel?.isStudentTargetedForSession(sessionId, studentId) ?: true
                         currentStudentViewModel?.markAttendance(sessionId, studentId)
                         JSONObject().apply {
                             put("type", "scan_result")
                             put("status", "success")
+                            put("isTargeted", isTargeted)
                             put("studentName", "${student.firstName} ${student.lastName}")
                         }.toString()
                     } else {
@@ -184,7 +177,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
             serverSocket = null
             withContext(Dispatchers.Main) {
                 hostSessionId = null
-                hostIp = null
+                localIp = null
                 publicIp = null
                 connectionStatus = "Idle"
             }
@@ -195,7 +188,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         try {
             val json = JSONObject(qrContent)
             val sessionId = json.getLong("sessionId")
-            val ip = json.getString("ip")
+            val lIp = json.getString("localIp")
             val pIp = if (json.has("publicIp")) json.getString("publicIp") else null
             
             assistantSessionId = sessionId
@@ -203,12 +196,12 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
             
             viewModelScope.launch(Dispatchers.IO) {
                 // Try the primary IP (usually local) first
-                if (pingHost(ip)) {
-                    assistantHostIp = ip
+                if (pingHost(lIp)) {
+                    assistantHostIp = lIp
                     isAssistant = true
-                    connectionStatus = "Connected to Host"
+                    connectionStatus = "Connected to Host (via Local IP)"
                     _events.emit(CollaborationEvent.ConnectionSuccess(sessionId))
-                } else if (pIp != null && pIp != ip && pingHost(pIp)) {
+                } else if (pIp != null && pIp != lIp && pingHost(pIp)) {
                     // Try the public IP as a fallback
                     assistantHostIp = pIp
                     isAssistant = true
@@ -216,7 +209,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                     _events.emit(CollaborationEvent.ConnectionSuccess(sessionId))
                 } else {
                     connectionStatus = "Cannot reach Host"
-                    _events.emit(CollaborationEvent.ConnectionError("Cannot reach Host at $ip" + (if(pIp != null) " or $pIp" else "")))
+                    _events.emit(CollaborationEvent.ConnectionError("Cannot reach Host at $lIp" + (if(pIp != null) " or $pIp" else "")))
                 }
             }
         } catch (e: Exception) {
@@ -254,8 +247,8 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         connectionStatus = "Idle"
     }
 
-    suspend fun scanStudentAsAssistant(studentId: String): Pair<Boolean, String> {
-        val ip = assistantHostIp ?: return false to "No host connection"
+    suspend fun scanStudentAsAssistant(studentId: String): Triple<Boolean, Boolean, String> {
+        val ip = assistantHostIp ?: return Triple(false, false, "No host connection")
         
         return withContext(Dispatchers.IO) {
             try {
@@ -274,17 +267,18 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                     if (response != null) {
                         val json = JSONObject(response)
                         if (json.optString("status") == "success") {
-                            true to "Scanned: ${json.optString("studentName")}"
+                            val isTargeted = json.optBoolean("isTargeted", true)
+                            Triple(true, isTargeted, "Scanned: ${json.optString("studentName")}")
                         } else {
-                            false to "Error: ${json.optString("message", "Unknown error")}"
+                            Triple(false, false, "Error: ${json.optString("message", "Unknown error")}")
                         }
                     } else {
-                        false to "No response from host"
+                        Triple(false, false, "No response from host")
                     }
                 }
             } catch (e: Exception) {
                 Log.e("Collaboration", "Scan request failed", e)
-                false to "Connection error: ${e.message}"
+                Triple(false, false, "Connection error: ${e.message}")
             }
         }
     }

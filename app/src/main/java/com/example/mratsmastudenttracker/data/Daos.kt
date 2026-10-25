@@ -4,36 +4,81 @@ import androidx.room.*
 import kotlinx.coroutines.flow.Flow
 
 @Dao
-interface ClassRoomDao {
-    @Query("SELECT * FROM classes ORDER BY name ASC")
-    fun getAllClasses(): Flow<List<ClassRoom>>
+interface LabelDao {
+    // Categories
+    @Query("SELECT * FROM label_categories ORDER BY LOWER(name) ASC")
+    fun getAllCategories(): Flow<List<LabelCategory>>
 
-    @Query("SELECT * FROM classes WHERE id = :id")
-    suspend fun getClassById(id: Long?): ClassRoom?
+    @Transaction
+    @Query("SELECT * FROM label_categories ORDER BY LOWER(name) ASC")
+    fun getAllCategoriesWithLabels(): Flow<List<LabelCategoryWithLabels>>
 
-    @Query("SELECT * FROM classes WHERE name = :name")
-    suspend fun getClassByName(name: String): ClassRoom?
+    @Query("SELECT * FROM label_categories WHERE id = :id")
+    suspend fun getCategoryById(id: Long): LabelCategory?
+
+    @Query("SELECT * FROM label_categories WHERE LOWER(name) = LOWER(:name)")
+    suspend fun getCategoryByName(name: String): LabelCategory?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertClass(classRoom: ClassRoom): Long
+    suspend fun insertCategory(category: LabelCategory): Long
 
     @Update
-    suspend fun updateClass(classRoom: ClassRoom)
+    suspend fun updateCategory(category: LabelCategory)
 
     @Delete
-    suspend fun deleteClass(classRoom: ClassRoom)
+    suspend fun deleteCategory(category: LabelCategory)
+
+    // Labels
+    @Query("SELECT * FROM labels ORDER BY LOWER(name) ASC")
+    fun getAllLabels(): Flow<List<Label>>
+
+    @Query("SELECT * FROM labels WHERE categoryId = :categoryId ORDER BY LOWER(name) ASC")
+    fun getLabelsForCategory(categoryId: Long): Flow<List<Label>>
+
+    @Query("SELECT * FROM labels WHERE id = :id")
+    suspend fun getLabelById(id: Long): Label?
+
+    @Query("SELECT * FROM labels WHERE categoryId = :categoryId AND LOWER(name) = LOWER(:name)")
+    suspend fun getLabelByNameAndCategory(name: String, categoryId: Long): Label?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertLabel(label: Label): Long
+
+    @Update
+    suspend fun updateLabel(label: Label)
+
+    @Delete
+    suspend fun deleteLabel(label: Label)
+
+    // Student-Label Junction
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertStudentLabelCrossRef(crossRef: StudentLabelCrossRef)
+
+    @Query("DELETE FROM student_label_cross_ref WHERE studentId = :studentId AND labelId = :labelId")
+    suspend fun deleteStudentLabelCrossRef(studentId: String, labelId: Long)
+
+    @Query("DELETE FROM student_label_cross_ref WHERE studentId = :studentId")
+    suspend fun deleteStudentLabels(studentId: String)
+
+    @Query("SELECT l.* FROM labels l INNER JOIN student_label_cross_ref ref ON l.id = ref.labelId WHERE ref.studentId = :studentId")
+    fun getLabelsForStudent(studentId: String): Flow<List<Label>>
+
+    @Query("SELECT l.* FROM labels l INNER JOIN student_label_cross_ref ref ON l.id = ref.labelId WHERE ref.studentId = :studentId")
+    suspend fun getLabelsForStudentSync(studentId: String): List<Label>
+
+    @Transaction
+    @Query("SELECT * FROM students ORDER BY LOWER(lastName) ASC, LOWER(firstName) ASC")
+    fun getAllStudentsWithLabels(): Flow<List<StudentWithLabels>>
+
+    @Transaction
+    @Query("SELECT * FROM students WHERE id = :studentId")
+    suspend fun getStudentWithLabelsById(studentId: String): StudentWithLabels?
 }
 
 @Dao
 interface StudentDao {
     @Query("SELECT * FROM students ORDER BY LOWER(lastName) ASC, LOWER(firstName) ASC")
     fun getAllStudents(): Flow<List<Student>>
-
-    @Query("SELECT * FROM students WHERE classId = :classId ORDER BY LOWER(lastName) ASC, LOWER(firstName) ASC")
-    fun getStudentsByClass(classId: Long): Flow<List<Student>>
-
-    @Query("SELECT * FROM students WHERE classId = NULL ORDER BY LOWER(lastName) ASC, LOWER(firstName) ASC")
-    fun getStudentsWithoutClass(): Flow<List<Student>>
 
     @Query("SELECT * FROM students WHERE id = :id")
     suspend fun getStudentById(id: String): Student?
@@ -82,24 +127,12 @@ interface AttendanceDao {
 
     @Query("DELETE FROM attendance WHERE sessionId = :sessionId AND studentId = :studentId")
     suspend fun deleteAttendance(sessionId: Long, studentId: String)
-
-    @Transaction
-    @Query("""
-        SELECT s.*, :sessionId as sessionId, c.name as className, 
-               (SELECT COUNT(*) FROM attendance a WHERE a.sessionId = :sessionId AND a.studentId = s.id) > 0 as isPresent,
-               (SELECT timestamp FROM attendance a WHERE a.sessionId = :sessionId AND a.studentId = s.id LIMIT 1) as timestamp
-        FROM students s
-        LEFT JOIN classes c ON s.classId = c.id
-        WHERE s.classId IN (:classIds)
-        ORDER BY LOWER(c.name) ASC, LOWER(s.lastName) ASC, LOWER(s.firstName) ASC
-    """)
-    fun getStudentAttendanceForSession(sessionId: Long, classIds: List<Long>): Flow<List<StudentAttendanceStatusResult>>
 }
 
 data class StudentAttendanceStatusResult(
-    @Embedded val student: Student,
+    val student: Student,
+    val labels: List<Label>,
     val sessionId: Long,
-    val className: String?,
     val isPresent: Boolean,
     val timestamp: Long?
 )

@@ -116,9 +116,9 @@ fun ScannerScreen(
                                             snackbarHostState.currentSnackbarData?.dismiss()
 
                                             if (collaborationViewModel.isAssistant) {
-                                                val (success, message) = collaborationViewModel.scanStudentAsAssistant(rawValue)
+                                                val (success, isTargeted, message) = collaborationViewModel.scanStudentAsAssistant(rawValue)
                                                 if (success) {
-                                                    overlayColor = Color.Green
+                                                    overlayColor = if (isTargeted) Color.Green else Color.Yellow
                                                     toneGenerator.startTone(ToneGenerator.TONE_CDMA_KEYPAD_VOLUME_KEY_LITE, 150)
                                                 } else {
                                                     overlayColor = Color.Red
@@ -128,10 +128,12 @@ fun ScannerScreen(
                                             } else {
                                                 val student = viewModel.getStudentById(rawValue).firstOrNull()
                                                 if (student != null) {
-                                                    overlayColor = Color.Green
-                                                    toneGenerator.startTone(ToneGenerator.TONE_CDMA_KEYPAD_VOLUME_KEY_LITE, 150)
+                                                    val isTargeted = viewModel.isStudentTargetedForSession(sessionId, rawValue)
                                                     viewModel.markAttendance(sessionId, rawValue)
-                                                    snackbarHostState.showSnackbar("Scanned student: ${student.firstName} ${student.lastName}")
+                                                    overlayColor = if (isTargeted) Color.Green else Color.Yellow
+                                                    toneGenerator.startTone(ToneGenerator.TONE_CDMA_KEYPAD_VOLUME_KEY_LITE, 150)
+                                                    val prefix = if (isTargeted) "Scanned student" else "Scanned student (Not targeted)"
+                                                    snackbarHostState.showSnackbar("$prefix: ${student.firstName} ${student.lastName}")
                                                 } else {
                                                     overlayColor = Color.Red
                                                     toneGenerator.startTone(ToneGenerator.TONE_SUP_ERROR, 250)
