@@ -63,6 +63,18 @@ data class ColumnMappingConfig(
     val customCategoryName: String = ""
 )
 
+enum class ImportMode(val displayName: String, val description: String) {
+    REPLACE("Replace", "Delete all existing database data before importing"),
+    MERGE("Merge", "Combine imported data with existing students and labels")
+}
+
+enum class CategoryConflictStrategy(val displayName: String, val description: String) {
+    OVERWRITE("Overwrite label", "Replace student's existing label in conflicting category with imported value"),
+    KEEP_ORIGINAL("Keep original label", "Keep student's original label in conflicting category"),
+    ADD_DUPLICATE_SAME_CATEGORY("Keep both in same category", "Assign imported label alongside existing label under the same category"),
+    CREATE_NEW_CATEGORY("Create new category (e.g. 'Category (2)')", "Create a new numbered category for imported labels so old and new categories stay separate")
+}
+
 enum class MatchType {
     FULL,
     ONE_CHAR_DIFF,
@@ -488,23 +500,53 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun importDatabaseFromJson(uri: Uri) {
+    fun clearDatabase() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                database.clearAllTables()
+                val context = getApplication<Application>()
+                val files = context.filesDir.listFiles()
+                files?.forEach { file ->
+                    if (file.name.startsWith("student_")) {
+                        file.delete()
+                    }
+                }
+            }
+            _events.emit(StudentEvent.ShowSnackbar("Entire database cleared."))
+        }
+    }
+
+    fun importDatabaseFromJson(
+        uri: Uri,
+        importMode: ImportMode = ImportMode.MERGE,
+        conflictStrategy: CategoryConflictStrategy = CategoryConflictStrategy.OVERWRITE
+    ) {
         viewModelScope.launch {
             val context = getApplication<Application>()
             var importedCount = 0
 
             try {
                 withContext(Dispatchers.IO) {
+                    if (importMode == ImportMode.REPLACE) {
+                        database.clearAllTables()
+                        val files = context.filesDir.listFiles()
+                        files?.forEach { file ->
+                            if (file.name.startsWith("student_")) file.delete()
+                        }
+                    }
+
                     val jsonString = context.contentResolver.openInputStream(uri)?.use { stream ->
                         BufferedReader(InputStreamReader(stream)).readText()
                     } ?: return@withContext
 
                     val jsonArray = JSONArray(jsonString)
 
+                    val existingCategories = repository.allCategories.first()
+                    val existingCategoryNames = existingCategories.map { it.name.lowercase() }.toSet()
+
                     val categoryCache = mutableMapOf<String, LabelCategory>()
                     val labelCache = mutableMapOf<Pair<Long, String>, Label>()
 
-                    val existingCategories = repository.allCategories.first()
                     existingCategories.forEach { categoryCache[it.name.lowercase()] = it }
 
                     for (i in 0 until jsonArray.length()) {
@@ -516,9 +558,20 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
 
                         if (firstName.isBlank() && lastName.isBlank()) continue
 
-                        val labelsJson = obj.optJSONArray("labels")
-                        val studentLabelIds = mutableListOf<Long>()
+                        val existingStudent = if (importMode == ImportMode.MERGE) {
+                            repository.getStudentWithLabelsById(id)
+                                ?: repository.allStudentsWithLabels.first().find {
+                                    it.student.firstName.equals(firstName, ignoreCase = true) &&
+                                            it.student.lastName.equals(lastName, ignoreCase = true)
+                                }
+                        } else null
 
+                        val studentLabelIds = mutableListOf<Long>()
+                        if (existingStudent != null) {
+                            studentLabelIds.addAll(existingStudent.labels.map { it.id })
+                        }
+
+                        val labelsJson = obj.optJSONArray("labels")
                         if (labelsJson != null) {
                             for (j in 0 until labelsJson.length()) {
                                 val labelObj = labelsJson.getJSONObject(j)
@@ -527,12 +580,21 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
 
                                 if (labelName.isNotBlank()) {
                                     val catKey = categoryName.lowercase()
-                                    val category = categoryCache.getOrPut(catKey) {
-                                        val existing = repository.getCategoryByName(categoryName)
+                                    val isConflictingCategory = existingCategoryNames.contains(catKey)
+
+                                    val targetCatName = if (isConflictingCategory && conflictStrategy == CategoryConflictStrategy.CREATE_NEW_CATEGORY) {
+                                        generateUniqueCategoryName(categoryName, existingCategoryNames, categoryCache.keys)
+                                    } else {
+                                        categoryName
+                                    }
+                                    val targetCatKey = targetCatName.lowercase()
+
+                                    val category = categoryCache.getOrPut(targetCatKey) {
+                                        val existing = repository.getCategoryByName(targetCatName)
                                         if (existing != null) existing
                                         else {
-                                            val catId = repository.insertCategory(LabelCategory(name = categoryName))
-                                            LabelCategory(id = catId, name = categoryName)
+                                            val catId = repository.insertCategory(LabelCategory(name = targetCatName))
+                                            LabelCategory(id = catId, name = targetCatName)
                                         }
                                     }
 
@@ -546,12 +608,32 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
                                         }
                                     }
 
-                                    studentLabelIds.add(label.id)
+                                    if (existingStudent != null && isConflictingCategory && conflictStrategy != CategoryConflictStrategy.CREATE_NEW_CATEGORY) {
+                                        val existingLabelsInCat = existingStudent.labels.filter { it.categoryId == category.id }
+                                        if (existingLabelsInCat.isNotEmpty()) {
+                                            when (conflictStrategy) {
+                                                CategoryConflictStrategy.OVERWRITE -> {
+                                                    studentLabelIds.removeAll(existingLabelsInCat.map { it.id })
+                                                    studentLabelIds.add(label.id)
+                                                }
+                                                CategoryConflictStrategy.KEEP_ORIGINAL -> {
+                                                    // Keep original label
+                                                }
+                                                CategoryConflictStrategy.ADD_DUPLICATE_SAME_CATEGORY, CategoryConflictStrategy.CREATE_NEW_CATEGORY -> {
+                                                    studentLabelIds.add(label.id)
+                                                }
+                                            }
+                                        } else {
+                                            studentLabelIds.add(label.id)
+                                        }
+                                    } else {
+                                        studentLabelIds.add(label.id)
+                                    }
                                 }
                             }
                         }
 
-                        var picturePath: String? = null
+                        var picturePath: String? = existingStudent?.student?.picturePath
                         if (imageBase64.isNotBlank()) {
                             try {
                                 val imageBytes = Base64.decode(imageBase64, Base64.DEFAULT)
@@ -568,11 +650,7 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
                             }
                         }
 
-                        var studentId = id
-                        if (studentId.isBlank() || repository.getStudentById(studentId) != null) {
-                            studentId = UUID.randomUUID().toString()
-                        }
-
+                        val studentId = existingStudent?.student?.id ?: id
                         val student = Student(
                             id = studentId,
                             firstName = firstName,
@@ -681,7 +759,9 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
     fun importWithMapping(
         filePreview: FilePreview,
         hasHeaderRow: Boolean,
-        mappings: List<ColumnMappingConfig>
+        mappings: List<ColumnMappingConfig>,
+        importMode: ImportMode = ImportMode.MERGE,
+        conflictStrategy: CategoryConflictStrategy = CategoryConflictStrategy.OVERWRITE
     ) {
         viewModelScope.launch {
             val context = getApplication<Application>()
@@ -689,6 +769,14 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
 
             try {
                 withContext(Dispatchers.IO) {
+                    if (importMode == ImportMode.REPLACE) {
+                        database.clearAllTables()
+                        val files = context.filesDir.listFiles()
+                        files?.forEach { file ->
+                            if (file.name.startsWith("student_")) file.delete()
+                        }
+                    }
+
                     val allRows = mutableListOf<List<String>>()
 
                     val isCsv = filePreview.fileName.lowercase().endsWith(".csv")
@@ -723,10 +811,12 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
                         categoryNameMap[mapConfig.columnIndex] = name
                     }
 
+                    val existingCategories = repository.allCategories.first()
+                    val existingCategoryNames = existingCategories.map { it.name.lowercase() }.toSet()
+
                     val categoryCache = mutableMapOf<String, LabelCategory>()
                     val labelCache = mutableMapOf<Pair<Long, String>, Label>()
 
-                    val existingCategories = repository.allCategories.first()
                     existingCategories.forEach { categoryCache[it.name.lowercase()] = it }
 
                     for (r in startRowIdx until allRows.size) {
@@ -737,7 +827,7 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
                         var lastName = ""
                         var customStudentId = ""
                         var imageBase64 = ""
-                        val studentLabelIds = mutableListOf<Long>()
+                        val importedCategoryLabels = mutableListOf<Pair<String, String>>()
 
                         mappings.forEach { mapConfig ->
                             val colIdx = mapConfig.columnIndex
@@ -751,28 +841,7 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
                                 ColumnType.LABEL_CATEGORY -> {
                                     if (value.isNotBlank()) {
                                         val catName = categoryNameMap[colIdx] ?: "Category ${colIdx + 1}"
-                                        val catKey = catName.lowercase()
-
-                                        val category = categoryCache.getOrPut(catKey) {
-                                            val existing = repository.getCategoryByName(catName)
-                                            if (existing != null) existing
-                                            else {
-                                                val id = repository.insertCategory(LabelCategory(name = catName))
-                                                LabelCategory(id = id, name = catName)
-                                            }
-                                        }
-
-                                        val labelKey = category.id to value.lowercase()
-                                        val label = labelCache.getOrPut(labelKey) {
-                                            val existing = repository.getLabelByNameAndCategory(value, category.id)
-                                            if (existing != null) existing
-                                            else {
-                                                val id = repository.insertLabel(Label(categoryId = category.id, name = value))
-                                                Label(id = id, categoryId = category.id, name = value)
-                                            }
-                                        }
-
-                                        studentLabelIds.add(label.id)
+                                        importedCategoryLabels.add(catName to value)
                                     }
                                 }
                                 ColumnType.IGNORE -> {}
@@ -781,12 +850,76 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
 
                         if (firstName.isBlank() && lastName.isBlank()) continue
 
-                        var studentId = customStudentId.ifBlank { UUID.randomUUID().toString() }
-                        while (customStudentId.isBlank() && repository.getStudentById(studentId) != null) {
-                            studentId = UUID.randomUUID().toString()
+                        val existingStudent = if (importMode == ImportMode.MERGE) {
+                            if (customStudentId.isNotBlank()) repository.getStudentWithLabelsById(customStudentId)
+                            else repository.allStudentsWithLabels.first().find {
+                                it.student.firstName.equals(firstName, ignoreCase = true) &&
+                                        it.student.lastName.equals(lastName, ignoreCase = true)
+                            }
+                        } else null
+
+                        val studentLabelIds = mutableListOf<Long>()
+                        if (existingStudent != null) {
+                            studentLabelIds.addAll(existingStudent.labels.map { it.id })
                         }
 
-                        var picturePath: String? = null
+                        importedCategoryLabels.forEach { (catName, value) ->
+                            val catKey = catName.lowercase()
+                            val isConflictingCategory = existingCategoryNames.contains(catKey)
+
+                            val targetCatName = if (isConflictingCategory && conflictStrategy == CategoryConflictStrategy.CREATE_NEW_CATEGORY) {
+                                generateUniqueCategoryName(catName, existingCategoryNames, categoryCache.keys)
+                            } else {
+                                catName
+                            }
+                            val targetCatKey = targetCatName.lowercase()
+
+                            val category = categoryCache.getOrPut(targetCatKey) {
+                                val existing = repository.getCategoryByName(targetCatName)
+                                if (existing != null) existing
+                                else {
+                                    val id = repository.insertCategory(LabelCategory(name = targetCatName))
+                                    LabelCategory(id = id, name = targetCatName)
+                                }
+                            }
+
+                            val labelKey = category.id to value.lowercase()
+                            val label = labelCache.getOrPut(labelKey) {
+                                val existing = repository.getLabelByNameAndCategory(value, category.id)
+                                if (existing != null) existing
+                                else {
+                                    val id = repository.insertLabel(Label(categoryId = category.id, name = value))
+                                    Label(id = id, categoryId = category.id, name = value)
+                                }
+                            }
+
+                            if (existingStudent != null && isConflictingCategory && conflictStrategy != CategoryConflictStrategy.CREATE_NEW_CATEGORY) {
+                                val existingLabelsInCat = existingStudent.labels.filter { it.categoryId == category.id }
+                                if (existingLabelsInCat.isNotEmpty()) {
+                                    when (conflictStrategy) {
+                                        CategoryConflictStrategy.OVERWRITE -> {
+                                            studentLabelIds.removeAll(existingLabelsInCat.map { it.id })
+                                            studentLabelIds.add(label.id)
+                                        }
+                                        CategoryConflictStrategy.KEEP_ORIGINAL -> {
+                                            // Keep original
+                                        }
+                                        CategoryConflictStrategy.ADD_DUPLICATE_SAME_CATEGORY -> {
+                                            studentLabelIds.add(label.id)
+                                        }
+                                        CategoryConflictStrategy.CREATE_NEW_CATEGORY -> {
+                                            studentLabelIds.add(label.id)
+                                        }
+                                    }
+                                } else {
+                                    studentLabelIds.add(label.id)
+                                }
+                            } else {
+                                studentLabelIds.add(label.id)
+                            }
+                        }
+
+                        var picturePath: String? = existingStudent?.student?.picturePath
                         if (imageBase64.isNotBlank()) {
                             try {
                                 val imageBytes = Base64.decode(imageBase64, Base64.DEFAULT)
@@ -802,6 +935,8 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
                                 e.printStackTrace()
                             }
                         }
+
+                        val studentId = existingStudent?.student?.id ?: customStudentId.ifBlank { UUID.randomUUID().toString() }
 
                         val student = Student(
                             id = studentId,
@@ -1089,6 +1224,19 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    suspend fun getSessionByIdSync(sessionId: Long): Session? {
+        return withContext(Dispatchers.IO) {
+            repository.getSessionById(sessionId)
+        }
+    }
+
+    suspend fun isStudentLateForSession(sessionId: Long, scanTimestamp: Long = System.currentTimeMillis()): Boolean {
+        return withContext(Dispatchers.IO) {
+            val session = repository.getSessionById(sessionId) ?: return@withContext false
+            scanTimestamp > session.endTime
+        }
+    }
+
     suspend fun isStudentTargetedForSession(sessionId: Long, studentId: String): Boolean {
         return withContext(Dispatchers.IO) {
             val session = repository.getSessionById(sessionId) ?: return@withContext true
@@ -1274,6 +1422,20 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             _events.emit(StudentEvent.ShowSnackbar("Skipped remaining unmatched images."))
         }
+    }
+
+    private fun generateUniqueCategoryName(
+        baseName: String,
+        existingNames: Set<String>,
+        cacheNames: Set<String>
+    ): String {
+        var index = 2
+        var candidate = "$baseName ($index)"
+        while (existingNames.contains(candidate.lowercase()) || cacheNames.contains(candidate.lowercase())) {
+            index++
+            candidate = "$baseName ($index)"
+        }
+        return candidate
     }
 
     private fun sanitizeString(str: String): String {

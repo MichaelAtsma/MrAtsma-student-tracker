@@ -25,6 +25,19 @@ sealed class CollaborationEvent {
     data class ConnectionError(val message: String) : CollaborationEvent()
 }
 
+enum class AssistantScanFeedback {
+    GREEN,
+    YELLOW,
+    RED
+}
+
+data class AssistantScanResult(
+    val feedback: AssistantScanFeedback,
+    val message: String,
+    val isUnrecognizedStatus: Boolean = false,
+    val rawStatus: String? = null
+)
+
 class CollaborationViewModel(application: Application) : AndroidViewModel(application) {
     private val SERVICE_ID = "com.example.mratsmastudenttracker.COLLABORATION"
     private val PORT = 8888
@@ -141,12 +154,23 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                     val student = currentStudentViewModel?.getStudentById(studentId)?.firstOrNull()
                     
                     if (student != null) {
+                        val scanTime = System.currentTimeMillis()
                         val isTargeted = currentStudentViewModel?.isStudentTargetedForSession(sessionId, studentId) ?: true
+                        val isLate = currentStudentViewModel?.isStudentLateForSession(sessionId, scanTime) ?: false
+                        
                         currentStudentViewModel?.markAttendance(sessionId, studentId)
+
+                        val statusString = when {
+                            !isTargeted -> "not_targeted"
+                            isLate -> "late"
+                            else -> "success"
+                        }
+
                         JSONObject().apply {
                             put("type", "scan_result")
-                            put("status", "success")
+                            put("status", statusString)
                             put("isTargeted", isTargeted)
+                            put("isLate", isLate)
                             put("studentName", "${student.firstName} ${student.lastName}")
                         }.toString()
                     } else {
@@ -247,8 +271,8 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         connectionStatus = "Idle"
     }
 
-    suspend fun scanStudentAsAssistant(studentId: String): Triple<Boolean, Boolean, String> {
-        val ip = assistantHostIp ?: return Triple(false, false, "No host connection")
+    suspend fun scanStudentAsAssistant(studentId: String): AssistantScanResult {
+        val ip = assistantHostIp ?: return AssistantScanResult(AssistantScanFeedback.RED, "No host connection")
         
         return withContext(Dispatchers.IO) {
             try {
@@ -266,19 +290,47 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                     val response = reader.readLine()
                     if (response != null) {
                         val json = JSONObject(response)
-                        if (json.optString("status") == "success") {
-                            val isTargeted = json.optBoolean("isTargeted", true)
-                            Triple(true, isTargeted, "Scanned: ${json.optString("studentName")}")
-                        } else {
-                            Triple(false, false, "Error: ${json.optString("message", "Unknown error")}")
+                        val status = json.optString("status")
+                        val studentName = json.optString("studentName", "Student")
+                        val message = json.optString("message", "")
+
+                        when (status) {
+                            "success", "on_time", "ok" -> {
+                                val isTargeted = json.optBoolean("isTargeted", true)
+                                val isLate = json.optBoolean("isLate", false)
+                                if (isTargeted && !isLate) {
+                                    AssistantScanResult(AssistantScanFeedback.GREEN, "Scanned: $studentName")
+                                } else {
+                                    val reason = if (!isTargeted) "Not targeted" else "LATE"
+                                    AssistantScanResult(AssistantScanFeedback.YELLOW, "Scanned: $studentName ($reason)")
+                                }
+                            }
+                            "late" -> {
+                                AssistantScanResult(AssistantScanFeedback.YELLOW, "Scanned: $studentName (LATE)")
+                            }
+                            "not_targeted" -> {
+                                AssistantScanResult(AssistantScanFeedback.YELLOW, "Scanned: $studentName (Not targeted)")
+                            }
+                            "error" -> {
+                                AssistantScanResult(AssistantScanFeedback.RED, if (message.isNotBlank()) message else "Error from host")
+                            }
+                            else -> {
+                                val statusText = if (status.isNotBlank()) status else "unknown"
+                                AssistantScanResult(
+                                    feedback = AssistantScanFeedback.YELLOW,
+                                    message = "Unrecognized status from host: '$statusText' ($studentName)",
+                                    isUnrecognizedStatus = true,
+                                    rawStatus = statusText
+                                )
+                            }
                         }
                     } else {
-                        Triple(false, false, "No response from host")
+                        AssistantScanResult(AssistantScanFeedback.RED, "No response from host")
                     }
                 }
             } catch (e: Exception) {
                 Log.e("Collaboration", "Scan request failed", e)
-                Triple(false, false, "Connection error: ${e.message}")
+                AssistantScanResult(AssistantScanFeedback.RED, "Connection error: ${e.message}")
             }
         }
     }
