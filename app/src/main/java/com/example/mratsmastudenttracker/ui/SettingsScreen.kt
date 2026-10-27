@@ -37,6 +37,7 @@ fun SettingsScreen(
 
     var showQrExportDialog by remember { mutableStateOf(false) }
     var showAttendanceExportDialog by remember { mutableStateOf(false) }
+    var showSessionExportDialog by remember { mutableStateOf(false) }
     var showDeleteDatabaseDialog by remember { mutableStateOf(false) }
     var showDatabaseImportConfigDialog by remember { mutableStateOf(false) }
     var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
@@ -46,6 +47,16 @@ fun SettingsScreen(
 
     val context = LocalContext.current
     var showImageImportPickerOptions by remember { mutableStateOf(false) }
+
+    val sessionJsonPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let {
+            scope.launch {
+                viewModel.importSessionsFromJson(it)
+            }
+        }
+    }
 
     val zipPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -163,6 +174,48 @@ fun SettingsScreen(
                             Text("Backup all students, pictures, and labels to Downloads", style = MaterialTheme.typography.bodySmall)
                         }
                         Icon(Icons.Default.Download, contentDescription = null)
+                    }
+                }
+            }
+
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { sessionJsonPickerLauncher.launch("*/*") }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Import Session(s) (JSON)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text("Import session(s) and attendance entries from JSON file", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Icon(Icons.Default.UploadFile, contentDescription = null)
+                    }
+                }
+            }
+
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { showSessionExportDialog = true }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Export Session(s) (JSON)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text("Export selected session(s) and their attendance data to JSON", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Icon(Icons.Default.EventRepeat, contentDescription = null)
                     }
                 }
             }
@@ -322,6 +375,17 @@ fun SettingsScreen(
                 onExport = { selectedSessionIds, sortOptions ->
                     viewModel.exportSessionsToExcelAdvanced(selectedSessionIds, sortOptions)
                     showAttendanceExportDialog = false
+                }
+            )
+        }
+
+        if (showSessionExportDialog) {
+            SessionExportConfigDialog(
+                viewModel = viewModel,
+                onDismiss = { showSessionExportDialog = false },
+                onExport = { selectedSessionIds ->
+                    viewModel.exportSessionsToJson(selectedSessionIds)
+                    showSessionExportDialog = false
                 }
             )
         }
@@ -833,6 +897,121 @@ fun AttendanceExportConfigDialog(
                         enabled = selectedSessionIds.isNotEmpty() && selectedSorts.any { it != null }
                     ) {
                         Text("Export Report")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SessionExportConfigDialog(
+    viewModel: StudentViewModel,
+    onDismiss: () -> Unit,
+    onExport: (List<Long>) -> Unit
+) {
+    val sessions by viewModel.allSessions.collectAsState()
+    val selectedSessionIds = remember { mutableStateListOf<Long>().apply { addAll(sessions.map { it.id }) } }
+    val dateFormatter = remember { SimpleDateFormat("EEE, MMM d, yyyy", Locale.getDefault()) }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .fillMaxHeight(0.75f),
+            shape = MaterialTheme.shapes.large,
+            tonalElevation = 6.dp
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("Export Session(s)", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Select Sessions (${selectedSessionIds.size}/${sessions.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(onClick = {
+                        if (selectedSessionIds.size == sessions.size) {
+                            selectedSessionIds.clear()
+                        } else {
+                            selectedSessionIds.clear()
+                            selectedSessionIds.addAll(sessions.map { it.id })
+                        }
+                    }) {
+                        Text(if (selectedSessionIds.size == sessions.size) "Deselect All" else "Select All")
+                    }
+                }
+
+                if (sessions.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "No sessions available in the database.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(sessions, key = { it.id }) { session ->
+                            val isSelected = selectedSessionIds.contains(session.id)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (isSelected) selectedSessionIds.remove(session.id)
+                                        else selectedSessionIds.add(session.id)
+                                    }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = isSelected,
+                                    onCheckedChange = { checked ->
+                                        if (checked) selectedSessionIds.add(session.id)
+                                        else selectedSessionIds.remove(session.id)
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = session.title?.ifBlank { null } ?: "Untitled Session",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = dateFormatter.format(Date(session.date)),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { onExport(selectedSessionIds.toList()) },
+                        enabled = selectedSessionIds.isNotEmpty()
+                    ) {
+                        Text("Export Session(s)")
                     }
                 }
             }

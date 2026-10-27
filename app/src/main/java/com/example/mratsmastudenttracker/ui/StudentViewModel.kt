@@ -463,6 +463,171 @@ class StudentViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // Sessions Export/Import
+    fun exportSessionsToJson(selectedSessionIds: List<Long>) {
+        viewModelScope.launch {
+            if (selectedSessionIds.isEmpty()) {
+                _events.emit(StudentEvent.ShowSnackbar("No sessions selected to export."))
+                return@launch
+            }
+
+            withContext(Dispatchers.IO) {
+                val sessionsToExport = allSessions.value.filter { it.id in selectedSessionIds }
+                if (sessionsToExport.isEmpty()) {
+                    _events.emit(StudentEvent.ShowSnackbar("No matching sessions found."))
+                    return@withContext
+                }
+
+                val attendances = getAllAttendances()
+                val attendanceMap = attendances.groupBy { it.sessionId }
+                val studentMap = allStudents.value.associateBy { it.id }
+
+                val rootObject = JSONObject()
+                rootObject.put("type", "MR_ATSMA_SESSIONS_EXPORT")
+                rootObject.put("version", 1)
+                rootObject.put("exportedAt", System.currentTimeMillis())
+
+                val sessionsJsonArray = JSONArray()
+
+                sessionsToExport.forEach { session ->
+                    val sessionObj = JSONObject()
+                    sessionObj.put("id", session.id)
+                    sessionObj.put("title", session.title ?: "")
+                    sessionObj.put("date", session.date)
+                    sessionObj.put("startTime", session.startTime)
+                    sessionObj.put("endTime", session.endTime)
+                    sessionObj.put("labelMatchMode", session.labelMatchMode.name)
+
+                    val targetLabelIdsArray = JSONArray()
+                    session.targetLabelIds.forEach { targetLabelIdsArray.put(it) }
+                    sessionObj.put("targetLabelIds", targetLabelIdsArray)
+
+                    val attendanceArray = JSONArray()
+                    val sessionAttendances = attendanceMap[session.id] ?: emptyList()
+                    sessionAttendances.forEach { att ->
+                        val attObj = JSONObject()
+                        attObj.put("studentId", att.studentId)
+                        attObj.put("timestamp", att.timestamp)
+                        val student = studentMap[att.studentId]
+                        if (student != null) {
+                            attObj.put("firstName", student.firstName)
+                            attObj.put("lastName", student.lastName)
+                        }
+                        attendanceArray.put(attObj)
+                    }
+                    sessionObj.put("attendance", attendanceArray)
+
+                    sessionsJsonArray.put(sessionObj)
+                }
+
+                rootObject.put("sessions", sessionsJsonArray)
+
+                saveJsonToPublicStorage(rootObject.toString(), "MrAtsmaSessions_Export_${System.currentTimeMillis()}.json")
+                _events.emit(StudentEvent.ShowSnackbar("${sessionsToExport.size} session(s) exported to Downloads."))
+            }
+        }
+    }
+
+    fun importSessionsFromJson(uri: Uri) {
+        viewModelScope.launch {
+            val context = getApplication<Application>()
+            var importedSessionCount = 0
+            var importedAttendanceCount = 0
+
+            try {
+                withContext(Dispatchers.IO) {
+                    val jsonString = context.contentResolver.openInputStream(uri)?.use { stream ->
+                        BufferedReader(InputStreamReader(stream)).readText()
+                    } ?: return@withContext
+
+                    val trimmed = jsonString.trim()
+                    val jsonArray = if (trimmed.startsWith("{")) {
+                        val rootObj = JSONObject(trimmed)
+                        rootObj.optJSONArray("sessions") ?: JSONArray()
+                    } else if (trimmed.startsWith("[")) {
+                        JSONArray(trimmed)
+                    } else {
+                        JSONArray()
+                    }
+
+                    if (jsonArray.length() == 0) {
+                        _events.emit(StudentEvent.ShowSnackbar("No sessions found in JSON file."))
+                        return@withContext
+                    }
+
+                    for (i in 0 until jsonArray.length()) {
+                        val sessionObj = jsonArray.getJSONObject(i)
+                        val title = sessionObj.optString("title", "").ifBlank { null }
+                        val date = sessionObj.optLong("date", System.currentTimeMillis())
+                        val startTime = sessionObj.optLong("startTime", System.currentTimeMillis())
+                        val endTime = sessionObj.optLong("endTime", System.currentTimeMillis())
+                        val matchModeStr = sessionObj.optString("labelMatchMode", LabelMatchMode.ALL_CATEGORIES.name)
+                        val labelMatchMode = try {
+                            LabelMatchMode.valueOf(matchModeStr)
+                        } catch (_: Exception) {
+                            LabelMatchMode.ALL_CATEGORIES
+                        }
+
+                        val targetLabelIds = mutableListOf<Long>()
+                        val targetLabelIdsArray = sessionObj.optJSONArray("targetLabelIds")
+                        if (targetLabelIdsArray != null) {
+                            for (k in 0 until targetLabelIdsArray.length()) {
+                                targetLabelIds.add(targetLabelIdsArray.getLong(k))
+                            }
+                        }
+
+                        val newSession = Session(
+                            id = 0,
+                            title = title,
+                            date = date,
+                            startTime = startTime,
+                            endTime = endTime,
+                            targetLabelIds = targetLabelIds,
+                            labelMatchMode = labelMatchMode
+                        )
+
+                        val newSessionId = repository.insertSession(newSession)
+                        importedSessionCount++
+
+                        val attendanceArray = sessionObj.optJSONArray("attendance")
+                        if (attendanceArray != null) {
+                            for (j in 0 until attendanceArray.length()) {
+                                val attObj = attendanceArray.getJSONObject(j)
+                                val studentId = attObj.optString("studentId", "").trim()
+                                if (studentId.isBlank()) continue
+
+                                val timestamp = attObj.optLong("timestamp", System.currentTimeMillis())
+                                val firstName = attObj.optString("firstName", "").trim()
+                                val lastName = attObj.optString("lastName", "").trim()
+
+                                val existingStudent = repository.getStudentById(studentId)
+                                if (existingStudent == null) {
+                                    repository.insertStudent(
+                                        Student(
+                                            id = studentId,
+                                            firstName = firstName.ifBlank { "Student" },
+                                            lastName = lastName.ifBlank { studentId }
+                                        )
+                                    )
+                                }
+
+                                repository.markAttendance(newSessionId, studentId, timestamp)
+                                importedAttendanceCount++
+                            }
+                        }
+                    }
+
+                    _events.emit(
+                        StudentEvent.ShowSnackbar("Successfully imported $importedSessionCount session(s) and $importedAttendanceCount attendance entry(ies).")
+                    )
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _events.emit(StudentEvent.ShowSnackbar("Failed to import sessions: ${e.localizedMessage}"))
+            }
+        }
+    }
+
     private suspend fun saveJsonToPublicStorage(jsonString: String, fileName: String) {
         withContext(Dispatchers.IO) {
             val context = getApplication<Application>()
