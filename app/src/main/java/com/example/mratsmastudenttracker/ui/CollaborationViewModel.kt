@@ -25,6 +25,19 @@ sealed class CollaborationEvent {
     data class ConnectionError(val message: String) : CollaborationEvent()
 }
 
+enum class AssistantScanFeedback {
+    GREEN,
+    YELLOW,
+    RED
+}
+
+data class AssistantScanResult(
+    val feedback: AssistantScanFeedback,
+    val message: String,
+    val isUnrecognizedStatus: Boolean = false,
+    val rawStatus: String? = null
+)
+
 class CollaborationViewModel(application: Application) : AndroidViewModel(application) {
     private val SERVICE_ID = "com.example.mratsmastudenttracker.COLLABORATION"
     private val PORT = 8888
@@ -33,7 +46,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         private set
     var hostSessionId by mutableStateOf<Long?>(null)
         private set
-    var hostIp by mutableStateOf<String?>(null)
+    var localIp by mutableStateOf<String?>(null)
         private set
     var publicIp by mutableStateOf<String?>(null)
         private set
@@ -61,10 +74,9 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
 
         hostSessionId = sessionId
         currentStudentViewModel = studentViewModel
-        
-        // Prefer local IP for reliability if on same network
-        val localIp = NetworkUtils.getLocalIpAddress()
-        hostIp = localIp ?: "Checking..."
+
+        localIp = NetworkUtils.getLocalIpAddress() ?: "No local IP found"
+        publicIp = "No public IP found"
         connectionStatus = "Detecting IP..."
         
         viewModelScope.launch {
@@ -72,18 +84,10 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                 val pIp = NetworkUtils.getMyPublicIpAsync().await()
                 if (!pIp.contains("error")) {
                     publicIp = pIp
-                    // Only use public IP as primary hostIp if local IP is not available
-                    // This prevents NAT loopback issues when devices are on the same network
-                    if (hostIp == "Checking..." || hostIp == null) {
-                        hostIp = pIp
-                    }
                 }
             } catch (e: Exception) {
                 Log.e("Collaboration", "Public IP fetch failed", e)
             } finally {
-                if (hostIp == "Checking...") {
-                    hostIp = NetworkUtils.getLocalIpAddress() ?: "No IP found"
-                }
                 startServer()
             }
         }
@@ -97,7 +101,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         serverJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 serverSocket = ServerSocket(PORT)
-                connectionStatus = "Hosting on $hostIp:$PORT"
+                connectionStatus = "Hosting on $publicIp:$PORT" // TODO add local IP
                 Log.d("Collaboration", "Server started on port $PORT")
                 
                 while (isActive && isHosting) {
@@ -150,10 +154,23 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                     val student = currentStudentViewModel?.getStudentById(studentId)?.firstOrNull()
                     
                     if (student != null) {
+                        val scanTime = System.currentTimeMillis()
+                        val isTargeted = currentStudentViewModel?.isStudentTargetedForSession(sessionId, studentId) ?: true
+                        val isLate = currentStudentViewModel?.isStudentLateForSession(sessionId, scanTime) ?: false
+                        
                         currentStudentViewModel?.markAttendance(sessionId, studentId)
+
+                        val statusString = when {
+                            !isTargeted -> "not_targeted"
+                            isLate -> "late"
+                            else -> "success"
+                        }
+
                         JSONObject().apply {
                             put("type", "scan_result")
-                            put("status", "success")
+                            put("status", statusString)
+                            put("isTargeted", isTargeted)
+                            put("isLate", isLate)
                             put("studentName", "${student.firstName} ${student.lastName}")
                         }.toString()
                     } else {
@@ -184,7 +201,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
             serverSocket = null
             withContext(Dispatchers.Main) {
                 hostSessionId = null
-                hostIp = null
+                localIp = null
                 publicIp = null
                 connectionStatus = "Idle"
             }
@@ -195,7 +212,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         try {
             val json = JSONObject(qrContent)
             val sessionId = json.getLong("sessionId")
-            val ip = json.getString("ip")
+            val lIp = json.getString("localIp")
             val pIp = if (json.has("publicIp")) json.getString("publicIp") else null
             
             assistantSessionId = sessionId
@@ -203,12 +220,12 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
             
             viewModelScope.launch(Dispatchers.IO) {
                 // Try the primary IP (usually local) first
-                if (pingHost(ip)) {
-                    assistantHostIp = ip
+                if (pingHost(lIp)) {
+                    assistantHostIp = lIp
                     isAssistant = true
-                    connectionStatus = "Connected to Host"
+                    connectionStatus = "Connected to Host (via Local IP)"
                     _events.emit(CollaborationEvent.ConnectionSuccess(sessionId))
-                } else if (pIp != null && pIp != ip && pingHost(pIp)) {
+                } else if (pIp != null && pIp != lIp && pingHost(pIp)) {
                     // Try the public IP as a fallback
                     assistantHostIp = pIp
                     isAssistant = true
@@ -216,7 +233,7 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                     _events.emit(CollaborationEvent.ConnectionSuccess(sessionId))
                 } else {
                     connectionStatus = "Cannot reach Host"
-                    _events.emit(CollaborationEvent.ConnectionError("Cannot reach Host at $ip" + (if(pIp != null) " or $pIp" else "")))
+                    _events.emit(CollaborationEvent.ConnectionError("Cannot reach Host at $lIp" + (if(pIp != null) " or $pIp" else "")))
                 }
             }
         } catch (e: Exception) {
@@ -254,8 +271,8 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
         connectionStatus = "Idle"
     }
 
-    suspend fun scanStudentAsAssistant(studentId: String): Pair<Boolean, String> {
-        val ip = assistantHostIp ?: return false to "No host connection"
+    suspend fun scanStudentAsAssistant(studentId: String): AssistantScanResult {
+        val ip = assistantHostIp ?: return AssistantScanResult(AssistantScanFeedback.RED, "No host connection")
         
         return withContext(Dispatchers.IO) {
             try {
@@ -273,18 +290,47 @@ class CollaborationViewModel(application: Application) : AndroidViewModel(applic
                     val response = reader.readLine()
                     if (response != null) {
                         val json = JSONObject(response)
-                        if (json.optString("status") == "success") {
-                            true to "Scanned: ${json.optString("studentName")}"
-                        } else {
-                            false to "Error: ${json.optString("message", "Unknown error")}"
+                        val status = json.optString("status")
+                        val studentName = json.optString("studentName", "Student")
+                        val message = json.optString("message", "")
+
+                        when (status) {
+                            "success", "on_time", "ok" -> {
+                                val isTargeted = json.optBoolean("isTargeted", true)
+                                val isLate = json.optBoolean("isLate", false)
+                                if (isTargeted && !isLate) {
+                                    AssistantScanResult(AssistantScanFeedback.GREEN, "Scanned: $studentName")
+                                } else {
+                                    val reason = if (!isTargeted) "Not targeted" else "LATE"
+                                    AssistantScanResult(AssistantScanFeedback.YELLOW, "Scanned: $studentName ($reason)")
+                                }
+                            }
+                            "late" -> {
+                                AssistantScanResult(AssistantScanFeedback.YELLOW, "Scanned: $studentName (LATE)")
+                            }
+                            "not_targeted" -> {
+                                AssistantScanResult(AssistantScanFeedback.YELLOW, "Scanned: $studentName (Not targeted)")
+                            }
+                            "error" -> {
+                                AssistantScanResult(AssistantScanFeedback.RED, if (message.isNotBlank()) message else "Error from host")
+                            }
+                            else -> {
+                                val statusText = if (status.isNotBlank()) status else "unknown"
+                                AssistantScanResult(
+                                    feedback = AssistantScanFeedback.YELLOW,
+                                    message = "Unrecognized status from host: '$statusText' ($studentName)",
+                                    isUnrecognizedStatus = true,
+                                    rawStatus = statusText
+                                )
+                            }
                         }
                     } else {
-                        false to "No response from host"
+                        AssistantScanResult(AssistantScanFeedback.RED, "No response from host")
                     }
                 }
             } catch (e: Exception) {
                 Log.e("Collaboration", "Scan request failed", e)
-                false to "Connection error: ${e.message}"
+                AssistantScanResult(AssistantScanFeedback.RED, "Connection error: ${e.message}")
             }
         }
     }

@@ -23,10 +23,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Event
-import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.NoAccounts
 import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material3.*
@@ -38,16 +36,16 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.example.mratsmastudenttracker.data.LabelMatchMode
 import com.example.mratsmastudenttracker.data.Session
 import com.example.mratsmastudenttracker.data.StudentAttendanceStatusResult
 import com.example.mratsmastudenttracker.ui.utils.QrCodeGenerator
 import org.json.JSONObject
 import java.text.SimpleDateFormat
-import java.time.LocalDate
-import java.time.LocalDateTime
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,10 +74,8 @@ fun SessionListScreen(
         }
     }
 
-    // 1. Set up the infinite transition
     val infiniteTransition = rememberInfiniteTransition(label = "blink")
 
-    // 2. Define the animated alpha value
     val alpha by infiniteTransition.animateFloat(
         initialValue = 1f,
         targetValue = 0f,
@@ -93,22 +89,11 @@ fun SessionListScreen(
         label = "alpha"
     )
 
-
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text("Sessions") },
-                actions = {
-                    IconButton(onClick = { viewModel.exportSessionsToExcel() }) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Icon(Icons.Default.Event, contentDescription = "Export Data")
-                            Icon(Icons.Default.Download, contentDescription = "Export Data")
-                        }
-                    }
-                },
                 windowInsets = WindowInsets(top = 0.dp)
             )
         },
@@ -215,7 +200,7 @@ fun HostSessionDialog(
     onHide: () -> Unit
 ) {
     var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    val hostIp = collaborationViewModel.hostIp
+    val localIp = collaborationViewModel.localIp
     val publicIp = collaborationViewModel.publicIp
 
     LaunchedEffect(session) {
@@ -224,10 +209,10 @@ fun HostSessionDialog(
         }
     }
 
-    LaunchedEffect(hostIp, publicIp) {
-        if (hostIp != null) {
+    LaunchedEffect(localIp, publicIp) {
+        if (localIp != null) {
             val qrData = JSONObject().apply {
-                put("ip", hostIp)
+                put("localIp", localIp)
                 put("sessionId", session.id)
                 if (publicIp != null) {
                     put("publicIp", publicIp)
@@ -249,8 +234,8 @@ fun HostSessionDialog(
                         modifier = Modifier.size(250.dp)
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("Local IP: $hostIp")
-                    if (publicIp != null && publicIp != hostIp) {
+                    Text("Local IP: $localIp")
+                    if (publicIp != null && publicIp != localIp) {
                         Text("Public IP: $publicIp", style = MaterialTheme.typography.labelSmall)
                     }
                 } else {
@@ -281,7 +266,7 @@ fun DeleteSessionDialog(
     val dateFormatter = remember { SimpleDateFormat("EEE, MMM d, yyyy", Locale.getDefault()) }
     val timeFormatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
-    val deleteQuestion = if (session.title != null) {
+    val deleteQuestion = if (!session.title.isNullOrEmpty()) {
         "Are you sure you want to delete the session ${session.title}?"
     } else {
         "Are you sure you want to delete the session on ${dateFormatter.format(session.date)} (${timeFormatter.format(session.startTime)} - ${timeFormatter.format(session.endTime)})?"
@@ -336,7 +321,7 @@ fun SessionItem(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column {
-                if (session.title != null && session.title != "") {
+                if (!session.title.isNullOrEmpty()) {
                     Text(
                         text = session.title,
                         style = MaterialTheme.typography.titleMedium
@@ -381,7 +366,7 @@ fun AddSessionScreen(
     viewModel: StudentViewModel,
     onNavigateBack: () -> Unit
 ) {
-    val classes by viewModel.allClasses.collectAsState()
+    val categoriesWithLabels by viewModel.allCategoriesWithLabels.collectAsState()
     val focusManager = LocalFocusManager.current
 
     var title by remember { mutableStateOf<String?>(null) }
@@ -396,7 +381,8 @@ fun AddSessionScreen(
     var endHour by remember { mutableIntStateOf((startHour + 1) % 24) }
     var endMinute by remember { mutableIntStateOf(startMinute) }
 
-    val selectedClassIds = remember { mutableStateListOf<Long>() }
+    val selectedLabelIds = remember { mutableStateListOf<Long>() }
+    var labelMatchMode by remember { mutableStateOf(LabelMatchMode.ALL_CATEGORIES) }
 
     val datePickerState = rememberDatePickerState(initialSelectedDateMillis = selectedDate)
     var showDatePicker by remember { mutableStateOf(false) }
@@ -485,25 +471,62 @@ fun AddSessionScreen(
                 }
             }
 
-            Text("Select Classes*:", style = MaterialTheme.typography.titleMedium)
+            Text("Category Matching Logic:", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = labelMatchMode == LabelMatchMode.ALL_CATEGORIES,
+                    onClick = { labelMatchMode = LabelMatchMode.ALL_CATEGORIES },
+                    label = { Text("ALL Categories (AND)") },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = labelMatchMode == LabelMatchMode.ANY_CATEGORY,
+                    onClick = { labelMatchMode = LabelMatchMode.ANY_CATEGORY },
+                    label = { Text("ANY Category (OR)") },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Text(
+                text = if (labelMatchMode == LabelMatchMode.ALL_CATEGORIES)
+                    "Student must match labels in ALL selected categories (e.g. Boy AND Class 4A)"
+                else
+                    "Student must match labels in ANY selected category (e.g. Boy OR Class 4C)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Text("Target Labels*:", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
             LazyColumn(modifier = Modifier.weight(1f)) {
-                items(classes, key = { it.id }) { classRoom ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(
-                            checked = selectedClassIds.contains(classRoom.id),
-                            onCheckedChange = { checked ->
-                                focusManager.clearFocus()
-                                if (checked) selectedClassIds.add(classRoom.id)
-                                else selectedClassIds.remove(classRoom.id)
+                items(categoriesWithLabels, key = { it.category.id }) { catWithLabels ->
+                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                        Text(catWithLabels.category.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        catWithLabels.labels.forEach { label ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        focusManager.clearFocus()
+                                        if (selectedLabelIds.contains(label.id)) selectedLabelIds.remove(label.id)
+                                        else selectedLabelIds.add(label.id)
+                                    }
+                                    .padding(vertical = 2.dp, horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = selectedLabelIds.contains(label.id),
+                                    onCheckedChange = { checked ->
+                                        focusManager.clearFocus()
+                                        if (checked) selectedLabelIds.add(label.id)
+                                        else selectedLabelIds.remove(label.id)
+                                    }
+                                )
+                                Text(text = label.name, style = MaterialTheme.typography.bodyLarge)
                             }
-                        )
-                        Text(text = classRoom.name, style = MaterialTheme.typography.bodyLarge)
+                        }
                     }
                 }
             }
@@ -524,11 +547,13 @@ fun AddSessionScreen(
                             set(Calendar.HOUR_OF_DAY, endHour)
                             set(Calendar.MINUTE, endMinute)
                         }.timeInMillis,
-                        targetClassIds = selectedClassIds.toList())
+                        targetLabelIds = selectedLabelIds.toList(),
+                        labelMatchMode = labelMatchMode
+                    )
                     onNavigateBack()
                 },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = selectedClassIds.isNotEmpty()
+                enabled = selectedLabelIds.isNotEmpty()
             ) {
                 Text("Create Session")
             }
@@ -597,7 +622,7 @@ fun EditSessionScreen(
     onNavigateBack: () -> Unit
 ) {
     val session by viewModel.getSessionById(sessionId).collectAsState(initial = null)
-    val classes by viewModel.allClasses.collectAsState()
+    val categoriesWithLabels by viewModel.allCategoriesWithLabels.collectAsState()
     val focusManager = LocalFocusManager.current
 
     if (session == null) return
@@ -616,7 +641,8 @@ fun EditSessionScreen(
     var endHour by remember(session) { mutableIntStateOf(initialEndCalendar.get(Calendar.HOUR_OF_DAY)) }
     var endMinute by remember(session) { mutableIntStateOf(initialEndCalendar.get(Calendar.MINUTE)) }
 
-    val selectedClassIds = remember { mutableStateListOf<Long>().apply { addAll(session!!.targetClassIds) } }
+    val selectedLabelIds = remember { mutableStateListOf<Long>().apply { addAll(session!!.targetLabelIds) } }
+    var labelMatchMode by remember(session) { mutableStateOf(session!!.labelMatchMode) }
 
     val datePickerState = rememberDatePickerState(initialSelectedDateMillis = selectedDate)
     var showDatePicker by remember { mutableStateOf(false) }
@@ -705,25 +731,62 @@ fun EditSessionScreen(
                 }
             }
 
-            Text("Select Classes*:", style = MaterialTheme.typography.titleMedium)
+            Text("Category Matching Logic:", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = labelMatchMode == LabelMatchMode.ALL_CATEGORIES,
+                    onClick = { labelMatchMode = LabelMatchMode.ALL_CATEGORIES },
+                    label = { Text("ALL Categories (AND)") },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = labelMatchMode == LabelMatchMode.ANY_CATEGORY,
+                    onClick = { labelMatchMode = LabelMatchMode.ANY_CATEGORY },
+                    label = { Text("ANY Category (OR)") },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Text(
+                text = if (labelMatchMode == LabelMatchMode.ALL_CATEGORIES)
+                    "Student must match labels in ALL selected categories (e.g. Boy AND Class 4A)"
+                else
+                    "Student must match labels in ANY selected category (e.g. Boy OR Class 4C)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Text("Target Labels*:", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
             LazyColumn(modifier = Modifier.weight(1f)) {
-                items(classes, key = { it.id }) { classRoom ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(
-                            checked = selectedClassIds.contains(classRoom.id),
-                            onCheckedChange = { checked ->
-                                focusManager.clearFocus()
-                                if (checked) selectedClassIds.add(classRoom.id)
-                                else selectedClassIds.remove(classRoom.id)
+                items(categoriesWithLabels, key = { it.category.id }) { catWithLabels ->
+                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                        Text(catWithLabels.category.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        catWithLabels.labels.forEach { label ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        focusManager.clearFocus()
+                                        if (selectedLabelIds.contains(label.id)) selectedLabelIds.remove(label.id)
+                                        else selectedLabelIds.add(label.id)
+                                    }
+                                    .padding(vertical = 2.dp, horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = selectedLabelIds.contains(label.id),
+                                    onCheckedChange = { checked ->
+                                        focusManager.clearFocus()
+                                        if (checked) selectedLabelIds.add(label.id)
+                                        else selectedLabelIds.remove(label.id)
+                                    }
+                                )
+                                Text(text = label.name, style = MaterialTheme.typography.bodyLarge)
                             }
-                        )
-                        Text(text = classRoom.name, style = MaterialTheme.typography.bodyLarge)
+                        }
                     }
                 }
             }
@@ -744,12 +807,13 @@ fun EditSessionScreen(
                             set(Calendar.HOUR_OF_DAY, endHour)
                             set(Calendar.MINUTE, endMinute)
                         }.timeInMillis,
-                        targetClassIds = selectedClassIds.toList()
+                        targetLabelIds = selectedLabelIds.toList(),
+                        labelMatchMode = labelMatchMode
                     ))
                     onNavigateBack()
                 },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = selectedClassIds.isNotEmpty()
+                enabled = selectedLabelIds.isNotEmpty()
             ) {
                 Text("Update Session")
             }
@@ -819,37 +883,43 @@ fun SessionDetailScreen(
     onNavigateToScanner: (Long) -> Unit
 ) {
     val session by viewModel.getSessionById(sessionId).collectAsState(initial = null)
-    val classes by viewModel.allClasses.collectAsState()
+    val categoriesWithLabels by viewModel.allCategoriesWithLabels.collectAsState()
 
     if (session == null) return
 
-    val attendanceStatus by viewModel.getStudentAttendanceForSession(sessionId, session!!.targetClassIds).collectAsState(initial = emptyList())
-    val now = LocalDateTime.now()
-    
-    // Performance: Grouping and sorting data outside the LazyColumn
-    val groupedAttendance = remember(attendanceStatus, session) {
-        session?.targetClassIds?.sortedBy { classId -> classes.find{it.id == classId}?.name }?.associateWith { classId ->
-            attendanceStatus.filter { it.student.classId == classId }
-//                .sortedBy {it.student.lastName}
-//                .sortedWith( compareBy( {it.isPresent}, {it.student.lastName} ))
-                .sortedWith(
-                    compareBy<StudentAttendanceStatusResult> { it.isPresent }
-                        .thenByDescending { it.timestamp }
-                        .thenBy { it.student.lastName }
-                )
-        } ?: emptyMap()
+    val attendanceStatus by viewModel.getStudentAttendanceForSession(
+        sessionId = sessionId,
+        targetLabelIds = session!!.targetLabelIds,
+        labelMatchMode = session!!.labelMatchMode
+    ).collectAsState(initial = emptyList())
+
+    val labelCategoryMap = remember(categoriesWithLabels) {
+        val map = mutableMapOf<Long, Pair<String, com.example.mratsmastudenttracker.data.Label>>()
+        categoriesWithLabels.forEach { catWithLabels ->
+            catWithLabels.labels.forEach { label ->
+                map[label.id] = catWithLabels.category.name to label
+            }
+        }
+        map
     }
 
-    // Performance: Pre-calculating late status outside the LazyColumn
+    val targetLabelsByCategory = remember(session, labelCategoryMap) {
+        val targetIds = session?.targetLabelIds ?: emptyList()
+        if (targetIds.isEmpty()) {
+            emptyMap()
+        } else {
+            targetIds.mapNotNull { labelId -> labelCategoryMap[labelId] }
+                .groupBy({ it.first }, { it.second })
+        }
+    }
+
     val lateMap = remember(attendanceStatus, session) {
         val endTime = session?.endTime ?: 0L
         attendanceStatus.associate { it.student.id to viewModel.isStudentLate(it, endTime) }
     }
 
-    // 1. Set up the infinite transition
     val infiniteTransition = rememberInfiniteTransition(label = "blink")
 
-    // 2. Define the animated alpha value
     val alpha by infiniteTransition.animateFloat(
         initialValue = 1f,
         targetValue = 0f,
@@ -911,7 +981,7 @@ fun SessionDetailScreen(
                 colors = CardDefaults.cardColors(MaterialTheme.colorScheme.primaryContainer)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    if (session!!.title != null && session!!.title != "") {
+                    if (!session!!.title.isNullOrEmpty()) {
                         Text(
                             text = session!!.title!!,
                             style = MaterialTheme.typography.headlineSmall
@@ -931,6 +1001,7 @@ fun SessionDetailScreen(
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
+                    Text(text = "Match mode: ${if (session!!.labelMatchMode == LabelMatchMode.ALL_CATEGORIES) "ALL selected categories (AND)" else "ANY selected category (OR)"}", style = MaterialTheme.typography.bodySmall)
                     Text(text = "Attendance: ${attendanceStatus.count { it.isPresent }}/${attendanceStatus.size}")
                 }
             }
@@ -943,46 +1014,89 @@ fun SessionDetailScreen(
             ) {
                 item { Spacer(modifier = Modifier.height(16.dp)) }
 
-                session!!.targetClassIds.forEach { classId ->
-                    val classObj = classes.find { it.id == classId }
-                    val studentsInClass = groupedAttendance[classId] ?: emptyList()
-
-                    item(key = "header-$classId") {
-                        if (classObj != null) {
-                            SubgroupAttendanceBar(
-                                className = classObj.name,
-                                attendanceList = studentsInClass,
-                                sessionEndTime = session!!.endTime,
-                                isStudentLate = viewModel::isStudentLate
+                if (targetLabelsByCategory.isEmpty()) {
+                    val studentsAll = attendanceStatus.sortedWith(
+                        compareBy<StudentAttendanceStatusResult> { it.isPresent }
+                            .thenByDescending { it.timestamp }
+                            .thenBy { it.student.lastName }
+                    )
+                    item(key = "header-all") {
+                        SubgroupAttendanceBar(
+                            groupName = "All Targeted Students",
+                            attendanceList = studentsAll,
+                            sessionEndTime = session!!.endTime,
+                            isStudentLate = viewModel::isStudentLate
+                        )
+                    }
+                    items(studentsAll, key = { it.student.id }) { status ->
+                        AttendanceItem(
+                            status = status,
+                            isLate = lateMap[status.student.id] ?: false,
+                            onManualMarkPresent = {
+                                attendanceToMarkManually = status
+                                showManualMarkPresentDialog = true
+                            },
+                            onManualMarkAbsent = {
+                                attendanceToMarkManually = status
+                                showManualMarkAbsentDialog = true
+                            }
+                        )
+                    }
+                } else {
+                    targetLabelsByCategory.forEach { (categoryName, labels) ->
+                        item(key = "cat-$categoryName") {
+                            Text(
+                                text = categoryName,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
-                    }
-                    
-                    if (studentsInClass.isEmpty()) {
-                        item(key = "empty-$classId") {
-                            Spacer(modifier = Modifier.height(24.dp))
-                        }
-                    } else {
-                        items(
-                            items = studentsInClass,
-                            key = { it.student.id }
-                        ) { status ->
-                            AttendanceItem(
-                                status = status,
-                                isLate = lateMap[status.student.id] ?: false,
-                                onManualMarkPresent = {
-                                    attendanceToMarkManually = status
-                                    showManualMarkPresentDialog = true
-                                },
-                                onManualMarkAbsent = {
-                                    attendanceToMarkManually = status
-                                    showManualMarkAbsentDialog = true
+                        labels.forEach { label ->
+                            val studentsInLabel = attendanceStatus.filter { status -> status.labels.any { it.id == label.id } }
+                                .sortedWith(
+                                    compareBy<StudentAttendanceStatusResult> { it.isPresent }
+                                        .thenByDescending { it.timestamp }
+                                        .thenBy { it.student.lastName }
+                                )
+                            item(key = "label-${label.id}") {
+                                SubgroupAttendanceBar(
+                                    groupName = label.name,
+                                    attendanceList = studentsInLabel,
+                                    sessionEndTime = session!!.endTime,
+                                    isStudentLate = viewModel::isStudentLate
+                                )
+                            }
+                            if (studentsInLabel.isEmpty()) {
+                                item(key = "empty-${label.id}") {
+                                    Spacer(modifier = Modifier.height(8.dp))
                                 }
-                            )
+                            } else {
+                                items(
+                                    items = studentsInLabel,
+                                    key = { "att_${label.id}_${it.student.id}" }
+                                ) { status ->
+                                    AttendanceItem(
+                                        status = status,
+                                        isLate = lateMap[status.student.id] ?: false,
+                                        onManualMarkPresent = {
+                                            attendanceToMarkManually = status
+                                            showManualMarkPresentDialog = true
+                                        },
+                                        onManualMarkAbsent = {
+                                            attendanceToMarkManually = status
+                                            showManualMarkAbsentDialog = true
+                                        }
+                                    )
+                                }
+                            }
+                            item(key = "footer-${label.id}") { Spacer(modifier = Modifier.height(8.dp)) }
                         }
                     }
-                    item(key = "footer-$classId") { Spacer(modifier = Modifier.height(96.dp)) }
                 }
+
+                item { Spacer(modifier = Modifier.height(80.dp)) }
             }
         }
 
@@ -1033,12 +1147,11 @@ fun SessionDetailScreen(
 
 @Composable
 fun SubgroupAttendanceBar(
-    className: String,
+    groupName: String,
     attendanceList: List<StudentAttendanceStatusResult>,
     sessionEndTime: Long,
     isStudentLate: (StudentAttendanceStatusResult, Long) -> Boolean
 ) {
-    // Performance: Calculations are remembered based on the list
     val counts = remember(attendanceList, sessionEndTime) {
         val onTime = attendanceList.count { it.isPresent && !isStudentLate(it, sessionEndTime) }
         val late = attendanceList.count { it.isPresent } - onTime
@@ -1052,7 +1165,7 @@ fun SubgroupAttendanceBar(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = className, style = MaterialTheme.typography.titleLarge)
+        Text(text = groupName, style = MaterialTheme.typography.titleLarge)
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -1077,7 +1190,7 @@ fun AttendanceItem(
 ) {
     val timeFormatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
-    Card (
+    Card(
         colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.5f))
     ) {
         Row(
@@ -1085,13 +1198,11 @@ fun AttendanceItem(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-
             AsyncImage(
                 model = status.student.picturePath,
                 contentDescription = null,
                 modifier = Modifier.size(40.dp)
             )
-
 
             Text(
                 text = "${status.student.firstName} ${status.student.lastName}",

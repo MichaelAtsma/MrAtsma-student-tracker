@@ -21,4 +21,20 @@ class Converters {
     fun toListLong(value: String?): List<Long>? {
         return value?.let { adapter.fromJson(it) }
     }
+
+    @TypeConverter
+    fun fromLabelMatchMode(mode: LabelMatchMode?): String? {
+        return mode?.name
+    }
+
+    @TypeConverter
+    fun toLabelMatchMode(value: String?): LabelMatchMode? {
+        return value?.let {
+            try {
+                LabelMatchMode.valueOf(it)
+            } catch (e: Exception) {
+                LabelMatchMode.ALL_CATEGORIES
+            }
+        } ?: LabelMatchMode.ALL_CATEGORIES
+    }
 }

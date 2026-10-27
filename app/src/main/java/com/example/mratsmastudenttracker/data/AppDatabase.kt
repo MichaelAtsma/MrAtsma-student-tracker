@@ -7,13 +7,20 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 
 @Database(
-    entities = [ClassRoom::class, Student::class, Session::class, Attendance::class],
-    version = 4,
+    entities = [
+        LabelCategory::class,
+        Label::class,
+        StudentLabelCrossRef::class,
+        Student::class,
+        Session::class,
+        Attendance::class
+    ],
+    version = 6,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
-    abstract fun classRoomDao(): ClassRoomDao
+    abstract fun labelDao(): LabelDao
     abstract fun studentDao(): StudentDao
     abstract fun sessionDao(): SessionDao
     abstract fun attendanceDao(): AttendanceDao

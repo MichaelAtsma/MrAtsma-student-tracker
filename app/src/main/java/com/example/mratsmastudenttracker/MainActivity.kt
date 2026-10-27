@@ -6,8 +6,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Class
+import androidx.compose.material.icons.automirrored.filled.Label
 import androidx.compose.material.icons.filled.Event
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -41,14 +43,26 @@ fun MainScreen() {
         bottomBar = {
             val navBackStackEntry by navController.currentBackStackEntryAsState()
             val currentDestination = navBackStackEntry?.destination
-            
+
             NavigationBar {
                 NavigationBarItem(
-                    icon = { Icon(Icons.Default.Class, contentDescription = null) },
-                    label = { Text("Classes") },
-                    selected = currentDestination?.route?.startsWith("classes") == true,
+                    icon = { Icon(Icons.Default.Group, contentDescription = null) },
+                    label = { Text("Students") },
+                    selected = currentDestination?.route?.startsWith("students") == true,
                     onClick = {
-                        navController.navigate("classes") {
+                        navController.navigate("students") {
+                            popUpTo(navController.graph.startDestinationId) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.AutoMirrored.Filled.Label, contentDescription = null) },
+                    label = { Text("Labels") },
+                    selected = currentDestination?.route?.startsWith("labels") == true,
+                    onClick = {
+                        navController.navigate("labels") {
                             popUpTo(navController.graph.startDestinationId) { saveState = true }
                             launchSingleTop = true
                             restoreState = true
@@ -67,31 +81,34 @@ fun MainScreen() {
                         }
                     }
                 )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text("Settings") },
+                    selected = currentDestination?.route?.startsWith("settings") == true,
+                    onClick = {
+                        navController.navigate("settings") {
+                            popUpTo(navController.graph.startDestinationId) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }
+                )
             }
         }
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = "classes",
+            startDestination = "students",
             modifier = Modifier.padding(innerPadding)
         ) {
-            composable("classes") {
-                ClassManagementScreen(
-                    viewModel = viewModel,
-                    onNavigateToStudents = { classId ->
-                        navController.navigate("classes/$classId")
-                    }
-                )
+            composable("students") {
+                StudentsScreen(viewModel = viewModel)
             }
-            composable(
-                route = "classes/{classId}",
-                arguments = listOf(navArgument("classId") { type = NavType.LongType })
-            ) { backStackEntry ->
-                val classId = backStackEntry.arguments?.getLong("classId") ?: return@composable
-                StudentManagementScreen(
-                    viewModel = viewModel,
-                    classId = classId
-                )
+            composable("labels") {
+                LabelManagementScreen(viewModel = viewModel)
+            }
+            composable("settings") {
+                SettingsScreen(viewModel = viewModel)
             }
             composable("sessions") {
                 SessionListScreen(

@@ -116,22 +116,44 @@ fun ScannerScreen(
                                             snackbarHostState.currentSnackbarData?.dismiss()
 
                                             if (collaborationViewModel.isAssistant) {
-                                                val (success, message) = collaborationViewModel.scanStudentAsAssistant(rawValue)
-                                                if (success) {
-                                                    overlayColor = Color.Green
-                                                    toneGenerator.startTone(ToneGenerator.TONE_CDMA_KEYPAD_VOLUME_KEY_LITE, 150)
-                                                } else {
-                                                    overlayColor = Color.Red
-                                                    toneGenerator.startTone(ToneGenerator.TONE_SUP_ERROR, 250)
+                                                val result = collaborationViewModel.scanStudentAsAssistant(rawValue)
+                                                when (result.feedback) {
+                                                    AssistantScanFeedback.GREEN -> {
+                                                        overlayColor = Color.Green
+                                                        toneGenerator.startTone(ToneGenerator.TONE_CDMA_KEYPAD_VOLUME_KEY_LITE, 150)
+                                                    }
+                                                    AssistantScanFeedback.YELLOW -> {
+                                                        overlayColor = Color.Yellow
+                                                        playWarningTone(toneGenerator, scope)
+                                                    }
+                                                    AssistantScanFeedback.RED -> {
+                                                        overlayColor = Color.Red
+                                                        toneGenerator.startTone(ToneGenerator.TONE_SUP_ERROR, 250)
+                                                    }
                                                 }
-                                                snackbarHostState.showSnackbar(message)
+                                                snackbarHostState.showSnackbar(result.message)
                                             } else {
                                                 val student = viewModel.getStudentById(rawValue).firstOrNull()
                                                 if (student != null) {
-                                                    overlayColor = Color.Green
-                                                    toneGenerator.startTone(ToneGenerator.TONE_CDMA_KEYPAD_VOLUME_KEY_LITE, 150)
+                                                    val scanTime = System.currentTimeMillis()
+                                                    val isTargeted = viewModel.isStudentTargetedForSession(sessionId, rawValue)
+                                                    val isLate = viewModel.isStudentLateForSession(sessionId, scanTime)
                                                     viewModel.markAttendance(sessionId, rawValue)
-                                                    snackbarHostState.showSnackbar("Scanned student: ${student.firstName} ${student.lastName}")
+
+                                                    if (isTargeted && !isLate) {
+                                                        overlayColor = Color.Green
+                                                        toneGenerator.startTone(ToneGenerator.TONE_CDMA_KEYPAD_VOLUME_KEY_LITE, 150)
+                                                        snackbarHostState.showSnackbar("Scanned student: ${student.firstName} ${student.lastName}")
+                                                    } else {
+                                                        overlayColor = Color.Yellow
+                                                        playWarningTone(toneGenerator, scope)
+                                                        val reason = when {
+                                                            !isTargeted && isLate -> "Not targeted & LATE"
+                                                            !isTargeted -> "Not targeted"
+                                                            else -> "LATE"
+                                                        }
+                                                        snackbarHostState.showSnackbar("Scanned student ($reason): ${student.firstName} ${student.lastName}")
+                                                    }
                                                 } else {
                                                     overlayColor = Color.Red
                                                     toneGenerator.startTone(ToneGenerator.TONE_SUP_ERROR, 250)
@@ -169,6 +191,18 @@ fun ScannerScreen(
             Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 Text("Camera permission required")
             }
+        }
+    }
+}
+
+private fun playWarningTone(toneGenerator: ToneGenerator, scope: kotlinx.coroutines.CoroutineScope) {
+    scope.launch {
+        try {
+            toneGenerator.startTone(ToneGenerator.TONE_CDMA_LOW_L, 120)
+            delay(100)
+            toneGenerator.startTone(ToneGenerator.TONE_CDMA_MED_L, 160)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 }
